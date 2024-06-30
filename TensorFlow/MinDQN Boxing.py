@@ -1,0 +1,233 @@
+"""
+A Minimal Deep Q-Learning Implementation (minDQN)
+
+Running this code will render the agent solving the CartPole environment using OpenAI gym. Our Minimal Deep Q-Network is approximately 150 lines of code. In addition, this implementation uses Tensorflow and Keras and should generally run in less than 15 minutes.
+
+Usage: python3 minDQN.py
+"""
+
+import gymnasium
+import tensorflow as tf
+import numpy as np
+from tensorflow import keras
+from keras.optimizers import Adam
+from keras import layers
+
+from collections import deque
+import random
+import matplotlib.pyplot as plt
+
+from PIL import Image
+
+RANDOM_SEED = 5
+tf.random.set_seed(RANDOM_SEED)
+#env = gymnasium.make("ALE/Freeway-v5", render_mode="human", mode=0)
+#env = gymnasium.make("ALE/Freeway-ram-v5", render_mode="human", mode=0)
+env = gymnasium.make("ALE/Boxing-ram-v5", render_mode="human")
+#env = gymnasium.make("ALE/Boxing-v5", render_mode="human")
+#env = gymnasium.make("ALE/Enduro-ram-v5", render_mode="human")
+#env = gymnasium.make("ALE/KungFuMaster-ram-v5", render_mode="human")
+
+
+np.random.seed(RANDOM_SEED)
+
+print("Action Space: {}".format(env.action_space))
+print("State space: {}".format(env.observation_space.shape))
+
+# An episode a full game
+# 1 episódio = 2 min
+# 30 episódios = 1h
+# 120 episódios = 4h (serviço)
+# 720 episódios = 1 dia
+#train_episodes = 300
+train_episodes = 100
+test_episodes = 100
+
+##########
+def toGreyScale(frame):
+    return np.mean(frame, 2).astype(np.uint8)
+    
+def halfDownsample(frame):
+    return frame[::2, ::2]
+
+def ringCut(frame):
+    return frame[30:180, 30:130]
+            # altura x largura
+
+def preprocessFrame(frame):
+    frameGrey = toGreyScale(frame)
+    processedFrame = ringCut(frameGrey)
+    processedFrame = halfDownsample(processedFrame)    
+    return processedFrame
+##########
+
+def agent(state_shape, action_shape):
+    """ The agent maps X-states to Y-actions
+    e.g. The neural network output is [.1, .7, .1, .3]
+    The highest value 0.7 is the Q-Value.
+    The index of the highest action (0.7) is action #1.
+    """
+    learning_rate = 0.001
+    init = tf.keras.initializers.HeUniform()
+    model = keras.Sequential()
+    model.add(layers.Input(shape=state_shape))
+    #model.add(layers.Input(shape=(8400)))
+    #model.add(layers.Input(shape=(3750)))
+    model.add(keras.layers.Dense(24, activation='relu', kernel_initializer=init))
+    model.add(keras.layers.Dense(12, activation='relu', kernel_initializer=init))
+    model.add(keras.layers.Dense(action_shape, activation='linear', kernel_initializer=init))
+    model.compile(loss=tf.keras.losses.Huber(), optimizer=Adam(learning_rate=learning_rate), metrics=['accuracy'])
+    return model
+
+def get_qs(model, state, step):
+    return model.predict(state.reshape([1, state.shape[0]]))[0]
+
+def train(env, replay_memory, model, target_model, done):
+    learning_rate = 0.7 # Learning rate
+    discount_factor = 0.618
+
+    MIN_REPLAY_SIZE = 1000
+    if len(replay_memory) < MIN_REPLAY_SIZE:
+        return
+
+    batch_size = 64 * 2
+    mini_batch = random.sample(replay_memory, batch_size)
+    current_states = np.array([transition[0] for transition in mini_batch])
+    current_qs_list = model.predict(current_states)
+    new_current_states = np.array([transition[3] for transition in mini_batch])
+    future_qs_list = target_model.predict(new_current_states)
+
+    X = []
+    Y = []
+    for index, (observation, action, reward, new_observation, done) in enumerate(mini_batch):
+        if not done:
+            max_future_q = reward + discount_factor * np.max(future_qs_list[index])
+        else:
+            max_future_q = reward
+
+        current_qs = current_qs_list[index]
+        current_qs[action] = (1 - learning_rate) * current_qs[action] + learning_rate * max_future_q
+
+        X.append(observation)
+        Y.append(current_qs)
+    model.fit(np.array(X), np.array(Y), batch_size=batch_size, verbose=0, shuffle=True)
+
+    
+def main():
+    epsilon = 1 # Epsilon-greedy algorithm in initialized at 1 meaning every step is random at the start
+    max_epsilon = 1 # You can't explore more than 100% of the time
+    #min_epsilon = 0.01 # At a minimum, we'll always explore 1% of the time
+    min_epsilon = 0.05 # At a minimum, we'll always explore 1% of the time
+    #decay = 0.01
+    #decay = 0.0001
+    #decay = 0.000002
+    #decay = 0.000002
+    decay = 0.00000000002
+
+    # 1. Initialize the Target and Main models
+    # Main Model (updated every 4 steps)
+    model = agent(env.observation_space.shape, env.action_space.n)
+    #model = agent(3750, env.action_space.n)
+    # Target Model (updated every 100 steps)
+    target_model = agent(env.observation_space.shape, env.action_space.n)
+    target_model.set_weights(model.get_weights())
+
+    replay_memory = deque(maxlen=50_000)
+
+    target_update_counter = 0
+
+    # X = states, y = actions
+    X = []
+    y = []
+
+    rewards = []
+    episodes = []
+    punches = []
+    recieved = []
+
+    steps_to_update_target_model = 0
+
+    for episode in range(train_episodes):
+        print(episode)
+        total_training_rewards = 0
+        total_training_punches = 0
+        total_training_losses = 0
+        observation, info = env.reset(seed=RANDOM_SEED)
+        #observation = preprocessFrame(observation)
+        done = False
+        episodes.append(episode + 1)
+        while not done:        
+        #for x in range(100):
+            steps_to_update_target_model += 1
+
+            random_number = np.random.rand()
+            # 2. Explore using the Epsilon Greedy Exploration Strategy
+            if random_number <= epsilon:
+                # Explore
+                action = env.action_space.sample()
+            else:
+                # Exploit best known action
+                # model dims are (batch, env.observation_space.n)
+                encoded = observation  
+                #print(encoded.shape)    
+                encoded_reshaped = encoded.reshape([1, encoded.shape[0]])
+                #encoded_reshaped = encoded.reshape([1, 8400])
+                #encoded_reshaped = encoded.reshape([1, 3750])
+                #encoded_reshaped = encoded.reshape([1, 75,50])
+                #print(encoded_reshaped)   
+                predicted = model.predict(encoded_reshaped).flatten()                
+                #print(predicted)   
+                action = np.argmax(predicted)
+                
+            new_observation, reward, done, truncated, info = env.step(action)
+            if reward < 0: total_training_losses += 1
+            if reward > 0: total_training_punches += 1
+            #new_observation = preprocessFrame(new_observation)
+            # img = Image.fromarray(new_observation)
+            # img.save('output4.png')
+            # break
+            replay_memory.append([observation, action, reward, new_observation, done])
+            #if reward != 0: print(reward)
+            epsilon = max(epsilon - decay, min_epsilon)
+
+            # 3. Update the Main Network using the Bellman Equation
+            if steps_to_update_target_model % 4 == 0 or done:
+                train(env, replay_memory, model, target_model, done)
+
+            observation = new_observation
+            total_training_rewards += reward
+
+            if done:
+                print('Total training rewards: {} after n steps = {} with final reward = {}'.format(total_training_rewards, episode, reward))
+                total_training_rewards += 1
+
+                if steps_to_update_target_model >= 100:
+                    print('Copying main network weights to the target network weights')
+                    target_model.set_weights(model.get_weights())
+                    steps_to_update_target_model = 0
+                break
+        rewards.append(total_training_rewards)
+        punches.append(total_training_punches)
+        recieved.append(total_training_losses)
+
+        #epsilon = min_epsilon + (max_epsilon - min_epsilon) * np.exp(-decay * episode)
+
+        #break
+    env.close()
+    plt.plot(episodes, rewards, label = "Reward", linestyle="-") 
+    plt.plot(episodes, punches, label = "Punches", linestyle="--") 
+    plt.plot(episodes, recieved, label = "Losses", linestyle="-.") 
+    plt.xlabel('Episódio')
+    plt.ylabel('Recompensa')
+    plt.title("Episódio x Recompensa")
+    plt.legend()
+    plt.show()
+    # Será exibido respectivamente, os episódios, recompensas, acertos do nosso personagem e do inimigo
+    print("Episódios:", episodes)
+    print("Recompensas:", rewards)
+    print("Socos:", punches)
+    print("Recebidos:", recieved)
+
+
+if __name__ == '__main__':
+    main()
